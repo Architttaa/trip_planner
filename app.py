@@ -208,11 +208,10 @@ with st.sidebar:
     st.markdown("### ⚙️ Settings")
 
     model_choice = st.selectbox(
-        "Gemini Model",
-        ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
-        index=0,
-        help="Flash is faster & free; Pro is more detailed"
-    )
+    "Gemini Model",
+    ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+    index=0,
+)
 
     currency = st.selectbox("Currency", ["USD", "INR", "EUR", "GBP"], index=0)
 
