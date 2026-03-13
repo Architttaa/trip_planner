@@ -1,25 +1,18 @@
 """
 Trip Planner Agent
 ==================
-LangChain-based agent combining:
-  - Google Gemini LLM
+Combining:
+  - Google Gemini LLM (direct SDK)
   - OpenWeatherMap (live weather)
   - Google Places API (hotels)
-  - Gemini-generated flight options
-  - Full itinerary via structured LLM output
+  - Gemini-generated flight options + itinerary
 """
 
 import re
 import json
 import requests
 import google.generativeai as genai
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.tools import tool
-from langchain.agents import AgentExecutor
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.prompts import ChatPromptTemplate
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -27,7 +20,6 @@ from typing import Optional
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_current_weather(city: str, api_key: str) -> dict:
-    """Fetch live weather from OpenWeatherMap."""
     if not api_key:
         return _mock_weather(city)
     try:
@@ -45,7 +37,6 @@ def get_current_weather(city: str, api_key: str) -> dict:
                 "description": d["weather"][0]["description"],
                 "humidity": d["main"]["humidity"],
                 "wind_speed": d["wind"]["speed"],
-                "visibility": d.get("visibility", "N/A"),
                 "source": "live"
             }
     except Exception:
@@ -54,7 +45,6 @@ def get_current_weather(city: str, api_key: str) -> dict:
 
 
 def get_weather_forecast(city: str, api_key: str) -> str:
-    """Fetch 5-day forecast summary."""
     if not api_key:
         return _mock_forecast(city)
     try:
@@ -77,7 +67,6 @@ def get_weather_forecast(city: str, api_key: str) -> str:
 
 
 def _mock_weather(city: str) -> dict:
-    """Fallback mock weather when API key is missing."""
     city_weather = {
         "Tokyo": {"temp": 22, "feels_like": 21, "description": "partly cloudy", "humidity": 65, "wind_speed": 3.5},
         "Udaipur": {"temp": 35, "feels_like": 38, "description": "sunny and hot", "humidity": 30, "wind_speed": 2.1},
@@ -104,11 +93,9 @@ def _mock_forecast(city: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_hotels_from_places(city: str, api_key: str) -> list:
-    """Search hotels using Google Places API."""
     if not api_key:
         return _mock_hotels(city)
     try:
-        # Text search for hotels
         search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
         resp = requests.get(search_url, params={
             "query": f"best hotels in {city}",
@@ -169,16 +156,19 @@ def _mock_hotels(city: str) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LLM-Generated: Flights, Itinerary, City Overview, Tips
+# LLM Helpers — all use Gemini SDK directly
 # ─────────────────────────────────────────────────────────────────────────────
 
+def llm_call(model, prompt: str) -> str:
+    """Single helper to call Gemini and return text."""
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
 def parse_trip_query(query: str) -> dict:
-    """Extract destination, duration, month from plain text."""
-    # Duration
     days_match = re.search(r'(\d+)\s*-?\s*day', query, re.I)
     days = int(days_match.group(1)) if days_match else 3
 
-    # Month
     months = ["January","February","March","April","May","June",
               "July","August","September","October","November","December"]
     month = "May"
@@ -187,15 +177,13 @@ def parse_trip_query(query: str) -> dict:
             month = m
             break
 
-    # Destination — take last capitalized word group before 'in'
     dest_match = re.search(r'trip\s+to\s+([\w\s]+?)(?:\s+in\s|\s*$)', query, re.I)
     destination = dest_match.group(1).strip().title() if dest_match else "Tokyo"
 
     return {"destination": destination, "days": days, "month": month}
 
 
-def generate_flights_with_llm(llm, destination: str, origin: str, days: int, month: str, currency: str) -> list:
-    """Use Gemini to generate realistic flight options."""
+def generate_flights_with_llm(model, destination: str, origin: str, days: int, month: str, currency: str) -> list:
     prompt = f"""You are a travel expert. Generate 3 realistic flight options for a trip from {origin or 'major international hub'} to {destination} in {month}, for {days} days.
 
 Return ONLY a valid JSON array (no markdown, no explanation) like:
@@ -211,10 +199,8 @@ Return ONLY a valid JSON array (no markdown, no explanation) like:
   }}
 ]
 Make prices realistic for {currency}. Include 1 direct and 2 with 1 stop. Vary airlines."""
-
     try:
-        response = llm.invoke(prompt)
-        text = response.content.strip()
+        text = llm_call(model, prompt)
         text = re.sub(r'```(?:json)?', '', text).strip('`').strip()
         return json.loads(text)
     except Exception:
@@ -226,18 +212,17 @@ Make prices realistic for {currency}. Include 1 direct and 2 with 1 stop. Vary a
         ]
 
 
-def generate_city_overview(llm, destination: str) -> str:
-    prompt = f"""Write exactly ONE compelling paragraph (100-150 words) about {destination}'s cultural and historic significance. 
-Cover: history, famous landmarks, cultural heritage, why it's a must-visit. 
+def generate_city_overview(model, destination: str) -> str:
+    prompt = f"""Write exactly ONE compelling paragraph (100-150 words) about {destination}'s cultural and historic significance.
+Cover: history, famous landmarks, cultural heritage, why it's a must-visit.
 Be vivid and engaging. No headers, just one paragraph."""
     try:
-        response = llm.invoke(prompt)
-        return response.content.strip()
+        return llm_call(model, prompt)
     except Exception:
-        return f"{destination} is a fascinating destination rich in history and culture, offering visitors a unique blend of ancient traditions and modern experiences."
+        return f"{destination} is a fascinating destination rich in history and culture."
 
 
-def generate_day_plan(llm, destination: str, days: int, month: str) -> list:
+def generate_day_plan(model, destination: str, days: int, month: str) -> list:
     prompt = f"""Create a detailed {days}-day itinerary for {destination} in {month}.
 
 Return ONLY a valid JSON array (no markdown, no backticks):
@@ -245,15 +230,14 @@ Return ONLY a valid JSON array (no markdown, no backticks):
   {{
     "day": "Day 1 - Arrival & Exploration",
     "morning": "activity description",
-    "afternoon": "activity description", 
+    "afternoon": "activity description",
     "evening": "activity description",
     "food": "restaurant or dish recommendation"
   }}
 ]
 Make it specific to {destination} with real places and experiences."""
     try:
-        response = llm.invoke(prompt)
-        text = response.content.strip()
+        text = llm_call(model, prompt)
         text = re.sub(r'```(?:json)?', '', text).strip('`').strip()
         return json.loads(text)
     except Exception:
@@ -261,14 +245,13 @@ Make it specific to {destination} with real places and experiences."""
                  "evening": "Dinner at local restaurant", "food": "Local specialty"} for i in range(days)]
 
 
-def generate_travel_tips(llm, destination: str, month: str) -> list:
+def generate_travel_tips(model, destination: str, month: str) -> list:
     prompt = f"""Give 5 practical travel tips for visiting {destination} in {month}.
 Return ONLY a JSON array of strings:
 ["tip 1", "tip 2", "tip 3", "tip 4", "tip 5"]
 Be specific and useful."""
     try:
-        response = llm.invoke(prompt)
-        text = response.content.strip()
+        text = llm_call(model, prompt)
         text = re.sub(r'```(?:json)?', '', text).strip('`').strip()
         return json.loads(text)
     except Exception:
@@ -281,15 +264,12 @@ Be specific and useful."""
         ]
 
 
-def generate_forecast_summary(llm, destination: str, month: str, days: int, weather_key: str) -> str:
-    """Try live forecast first, fallback to LLM estimate."""
+def generate_forecast_summary(model, destination: str, month: str, weather_key: str) -> str:
     if weather_key:
         return get_weather_forecast(destination, weather_key)
-    # LLM fallback
     prompt = f"Describe typical weather in {destination} during {month} in 3-4 bullet points. Include temperature range, rainfall, and what to pack."
     try:
-        response = llm.invoke(prompt)
-        return response.content.strip()
+        return llm_call(model, prompt)
     except Exception:
         return f"Typical {month} weather in {destination}: pleasant conditions ideal for tourism."
 
@@ -308,31 +288,24 @@ class TripPlannerAgent:
         currency: str = "USD",
     ):
         genai.configure(api_key=gemini_api_key)
-        self.llm = ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=gemini_api_key,
-            temperature=0.7,
-        )
+        self.model = genai.GenerativeModel(model)
         self.weather_key = weather_api_key
         self.places_key = places_api_key
         self.currency = currency
 
     def plan_trip(self, query: str, origin: str = "") -> dict:
-        """Orchestrate all data sources and return structured trip plan."""
-        # Parse query
         info = parse_trip_query(query)
         dest = info["destination"]
         days = info["days"]
         month = info["month"]
 
-        # Run all data fetches
         current_weather = get_current_weather(dest, self.weather_key)
-        forecast = generate_forecast_summary(self.llm, dest, month, days, self.weather_key)
+        forecast = generate_forecast_summary(self.model, dest, month, self.weather_key)
         hotels = get_hotels_from_places(dest, self.places_key)
-        flights = generate_flights_with_llm(self.llm, dest, origin, days, month, self.currency)
-        city_overview = generate_city_overview(self.llm, dest)
-        day_plan = generate_day_plan(self.llm, dest, days, month)
-        tips = generate_travel_tips(self.llm, dest, month)
+        flights = generate_flights_with_llm(self.model, dest, origin, days, month, self.currency)
+        city_overview = generate_city_overview(self.model, dest)
+        day_plan = generate_day_plan(self.model, dest, days, month)
+        tips = generate_travel_tips(self.model, dest, month)
 
         return {
             "travel_info": {
@@ -350,3 +323,13 @@ class TripPlannerAgent:
             "travel_tips": tips,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
+```
+
+---
+
+**requirements.txt** — replace entire file with this:
+```
+streamlit>=1.32.0
+google-generativeai>=0.7.0
+requests>=2.31.0
+python-dotenv>=1.0.0
